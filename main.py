@@ -9,6 +9,8 @@ app = Flask(__name__)
 USERNAME = os.environ.get('KIA_USERNAME')
 PASSWORD = os.environ.get('KIA_PASSWORD')
 PIN = os.environ.get('KIA_PIN')
+SECRET_KEY = os.environ.get("SECRET_KEY")
+VEHICLE_ID = os.environ.get("VEHICLE_ID")
 
 if USERNAME is None or PASSWORD is None or PIN is None:
     raise ValueError("Missing credentials! Check your environment variables.")
@@ -21,6 +23,18 @@ vehicle_manager = VehicleManager(
     password=PASSWORD,
     pin=str(PIN)
 )
+
+# Secret key for security - moved to environment variables
+if not SECRET_KEY:
+    raise ValueError("Missing SECRET_KEY environment variable.")
+
+# Dynamically fetch the first vehicle ID if VEHICLE_ID is not set
+if not VEHICLE_ID:
+    if not vehicle_manager.vehicles:
+        raise ValueError("No vehicles found in the account. Please ensure your Kia account has at least one vehicle.")
+    # Fetch the first vehicle ID
+    VEHICLE_ID = next(iter(vehicle_manager.vehicles.keys()))
+    print(f"No VEHICLE_ID provided. Using the first vehicle found: {VEHICLE_ID}")
 
 # Refresh the token and update vehicle states
 try:
@@ -36,20 +50,6 @@ except AuthenticationError as e:
 except Exception as e:
     print(f"Unexpected error during initialization: {e}")
     exit(1)
-
-# Secret key for security - moved to environment variables
-SECRET_KEY = os.environ.get("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("Missing SECRET_KEY environment variable.")
-
-# Dynamically fetch the first vehicle ID if VEHICLE_ID is not set
-VEHICLE_ID = os.environ.get("VEHICLE_ID")
-if not VEHICLE_ID:
-    if not vehicle_manager.vehicles:
-        raise ValueError("No vehicles found in the account. Please ensure your Kia account has at least one vehicle.")
-    # Fetch the first vehicle ID
-    VEHICLE_ID = next(iter(vehicle_manager.vehicles.keys()))
-    print(f"No VEHICLE_ID provided. Using the first vehicle found: {VEHICLE_ID}")
 
 # Log incoming requests
 @app.before_request
@@ -101,6 +101,58 @@ def list_vehicles():
     except Exception as e:
         print(f"Error in /list_vehicles: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/vehicle_status', methods=['GET'])
+def vehicle_status():
+    print("Received request to /vehicle_status")
+    if request.headers.get("Authorization") != SECRET_KEY:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    try:
+        vehicle_manager.update_all_vehicles_with_cached_state()
+        vehicle = vehicle_manager.vehicles[VEHICLE_ID]
+        rpt = getattr(vehicle, 'vehicleStatusRpt', None)
+
+        if rpt:
+            vs = rpt.get('vehicleStatus', {})
+            climate = vs.get('climate', {})
+            distance = vs.get('distanceToEmpty', {})
+            fuel = vs.get('fuelLevel', None)
+            engine = vs.get('engine', None)
+            locked = vs.get('doorLock', None)
+            odometer = vs.get('odometer', {}).get('value', None)
+
+            status = {
+                "locked": locked,
+                "engineOn": engine,
+                "fuelLevel": fuel,
+                "interiorTemperature": parse_temperature(climate.get('airTemp')),
+                "acSetTemperature": parse_temperature(climate.get('heatingTemp')),
+                "rangeMiles": distance.get('value', None),
+                "odometer": odometer,
+                "climateOn": vs.get('airCtrl', None)
+            }
+        else:
+            status = {
+                "locked": getattr(vehicle, "is_locked", None),
+                "engineOn": getattr(vehicle, "engine_is_running", None),
+                "fuelLevel": getattr(vehicle, "fuel_level", None),
+                "interiorTemperature": getattr(vehicle, "interior_temperature", None),
+                "acSetTemperature": getattr(vehicle, "climate_temperature", None),
+                "rangeMiles": getattr(vehicle, "fuel_driving_range", None),
+                "odometer": getattr(vehicle, "odometer_value", None),
+                "climateOn": getattr(vehicle, "is_climate_on", None)
+            }
+
+        print(status)
+        return jsonify(status), 200
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error in /vehicle_status:\n{error_trace}")
+        return jsonify({"error": error_trace}), 500
+
 
 # Start climate endpoint
 @app.route('/start_climate', methods=['POST'])
