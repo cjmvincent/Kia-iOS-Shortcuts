@@ -1,0 +1,3 @@
+Flask
+hyundai-kia-connect-api
+requests
