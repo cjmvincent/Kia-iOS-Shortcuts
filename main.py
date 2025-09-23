@@ -57,9 +57,10 @@ def _init_vehicle_manager() -> None:
         return
 
     try:
+        region_val, brand_val = _resolve_region_brand()
         vm = VehicleManager(
-            region=getattr(Region, "US", getattr(Region, "NORTH_AMERICA", Region.US)),
-            brand=Brand.KIA,
+            region=region_val,
+            brand=brand_val,
             username=USERNAME,
             password=PASSWORD,
             pin=str(PIN),
