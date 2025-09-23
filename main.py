@@ -16,8 +16,8 @@ if not USERNAME or not PASSWORD or not PIN or not SECRET_KEY:
     raise ValueError("Missing one or more required environment variables.")
 
 vehicle_manager = VehicleManager(
-    region=3,  # North America
-    brand=1,   # KIA
+    region=US,  # North America
+    brand=KIA,   # KIA
     username=USERNAME,
     password=PASSWORD,
     pin=str(PIN)
