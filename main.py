@@ -105,6 +105,27 @@ def _init_vehicle_manager() -> None:
                 if not VEHICLE_ID:
                     VEHICLE_ID = next(iter(vm.vehicles.keys()))
                     app.logger.info("[init] No VEHICLE_ID provided. Using first vehicle: %s", VEHICLE_ID)
+                # Monkey-patch: verbose HTTP logging of outgoing requests when LOG_HTTP=1
+                if os.getenv("LOG_HTTP") == "1":
+                    try:
+                        import functools
+                        sess = getattr(vm.api, "session", None)
+                        if sess and hasattr(sess, "request"):
+                            orig_req = sess.request
+                            @functools.wraps(orig_req)
+                            def _req(method, url, *args, **kwargs):
+                                body = kwargs.get("json") or kwargs.get("data")
+                                app.logger.info("[http] %s %s body=%s", method, url, body)
+                                resp = orig_req(method, url, *args, **kwargs)
+                                try:
+                                    app.logger.info("[http] -> %s %s", resp.status_code, getattr(resp, "text", ""))
+                                except Exception:
+                                    pass
+                                return resp
+                            sess.request = _req
+                            app.logger.info("[init] HTTP logging enabled for hyundai-kia-connect-api session")
+                    except Exception:
+                        app.logger.exception("[init] Failed to enable HTTP logging")
                 vehicle_manager = vm
                 init_error = None
                 return
