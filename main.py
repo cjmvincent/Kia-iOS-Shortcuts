@@ -73,8 +73,7 @@ def _init_vehicle_manager() -> None:
             vm.update_all_vehicles_with_cached_state()
         except Exception:
             # Capture the exact failure that happens *after* token refresh
-            app.logger.error("[init] update_all_vehicles_with_cached_state() failed:
-" + traceback.format_exc())
+            app.logger.error("[init] update_all_vehicles_with_cached_state() failed: %s", traceback.format_exc())
             init_error = "Token refreshed, but failed to update vehicle state. See logs."
             return
 
@@ -93,7 +92,7 @@ def _init_vehicle_manager() -> None:
 
     except Exception:
         init_error = traceback.format_exc()
-        app.logger.error("Initialization failed:\n" + init_error)
+        app.logger.error("Initialization failed: %s", init_error)
 
 
 def ensure_initialized():
