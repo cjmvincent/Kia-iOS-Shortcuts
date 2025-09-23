@@ -270,6 +270,7 @@ def start_climate():
     temp_env_units = (os.getenv("CLIMATE_DEGREES", "F").upper())
     default_temp = 72 if temp_env_units == "F" else 22
     temperature = body.get("temperature", default_temp)
+    force = bool(body.get("force", False))  # skip preflight if true
 
     def _apply_temperature(opts, temp):
         try:
@@ -283,30 +284,76 @@ def start_climate():
             pass
         return False
 
+    def _vehicle_state_snapshot(v):
+        return {
+            "locked": getattr(v, "is_locked", None),
+            "any_door_open": getattr(v, "is_any_door_open", None) or getattr(v, "door_open", None),
+            "hood_open": getattr(v, "hood_open", None) or getattr(v, "is_hood_open", None),
+            "trunk_open": getattr(v, "trunk_open", None) or getattr(v, "is_trunk_open", None) or getattr(v, "is_tailgate_open", None),
+            "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
+            "gear": getattr(v, "gear", None) or getattr(v, "transmission_gear", None) or getattr(v, "gear_position", None),
+        }
+
+    def _preflight(v):
+        s = _vehicle_state_snapshot(v)
+        missing = []
+        # try to lock if unlocked
+        if s["locked"] is False:
+            try:
+                vehicle_manager.lock(VEHICLE_ID)
+                s["locked"] = True
+            except Exception:
+                pass
+        if s["locked"] is False:
+            missing.append("Doors must be locked")
+        if s["any_door_open"] is True:
+            missing.append("All doors must be closed")
+        if s["hood_open"] is True:
+            missing.append("Hood must be closed")
+        if s["trunk_open"] is True:
+            missing.append("Trunk/tailgate must be closed")
+        if s["ignition_on"] is True:
+            missing.append("Ignition/ACC must be off")
+        # Gear check: accept values that look like 'P', 'Park', or 0 for park; flag otherwise if known
+        gear = s["gear"]
+        if gear not in (None, "P", "Park", "park", 0):
+            missing.append("Transmission must be in Park")
+        return missing, s
+
     try:
         vehicle_manager.check_and_refresh_token()
         vehicle_manager.update_all_vehicles_with_cached_state()
+        v = vehicle_manager.vehicles.get(VEHICLE_ID)
+        if not v:
+            return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
 
-        # Try constructor with extended kwargs used by some library versions
+        if not force:
+            missing, snap = _preflight(v)
+            if missing:
+                return jsonify({
+                    "error": "Preconditions not met for remote climate",
+                    "missing": missing,
+                    "snapshot": snap
+                }), 400
+
+        # Build options (newer ctor first)
         try:
             opts = ClimateRequestOptions(
                 duration=duration,
                 defrost=defrost,
-                climate=True,         # request HVAC on
-                heating=True,         # some versions require explicit flag
-                set_temp=temperature  # many versions expect set_temp
+                climate=True,
+                heating=True,
+                set_temp=temperature,
             )
             temp_applied = True
         except TypeError:
-            # Fallback to minimal ctor then setattr
             opts = ClimateRequestOptions(duration, defrost)
             temp_applied = _apply_temperature(opts, temperature)
-        app.logger.info("/start_climate with duration=%s, defrost=%s, temp=%s, temp_applied=%s", duration, defrost, temperature, temp_applied)
 
-        try:
-            vehicle_manager.lock(VEHICLE_ID)
-        except Exception:
-            pass
+        app.logger.info(
+            "/start_climate with duration=%s, defrost=%s, temp=%s, temp_applied=%s, force=%s",
+            duration, defrost, temperature, temp_applied, force,
+        )
 
         try:
             res = vehicle_manager.start_climate(VEHICLE_ID, opts)
