@@ -287,8 +287,20 @@ def start_climate():
         vehicle_manager.check_and_refresh_token()
         vehicle_manager.update_all_vehicles_with_cached_state()
 
-        opts = ClimateRequestOptions(duration, defrost)
-        temp_applied = _apply_temperature(opts, temperature)
+        # Try constructor with extended kwargs used by some library versions
+        try:
+            opts = ClimateRequestOptions(
+                duration=duration,
+                defrost=defrost,
+                climate=True,         # request HVAC on
+                heating=True,         # some versions require explicit flag
+                set_temp=temperature  # many versions expect set_temp
+            )
+            temp_applied = True
+        except TypeError:
+            # Fallback to minimal ctor then setattr
+            opts = ClimateRequestOptions(duration, defrost)
+            temp_applied = _apply_temperature(opts, temperature)
         app.logger.info("/start_climate with duration=%s, defrost=%s, temp=%s, temp_applied=%s", duration, defrost, temperature, temp_applied)
 
         try:
