@@ -259,7 +259,6 @@ def start_climate():
     if not ok:
         return jsonify({"error": msg}), 500
 
-    # Body may include: duration (1-30), defrost (bool), temperature (int, F or C depending on lib/vehicle)
     body = request.get_json(silent=True) or {}
     try:
         duration = int(body.get("duration", 10))
@@ -267,15 +266,17 @@ def start_climate():
         duration = 10
     duration = max(1, min(duration, 30))
     defrost = bool(body.get("defrost", False))
-    temperature = body.get("temperature")  # optional
 
-    def _apply_temperature(opts, temp):  # set if supported by library version
+    temp_env_units = (os.getenv("CLIMATE_DEGREES", "F").upper())
+    default_temp = 72 if temp_env_units == "F" else 22
+    temperature = body.get("temperature", default_temp)
+
+    def _apply_temperature(opts, temp):
         try:
-            if temp is not None:
-                # Common attribute names seen across versions
-                for name in ("temperature", "target_temperature", "set_temperature"):
-                    if not hasattr(opts, name):
-                        continue
+            if temp is None:
+                return False
+            for name in ("temperature", "target_temperature", "set_temperature", "targetTemperature"):
+                if hasattr(opts, name):
                     setattr(opts, name, temp)
                     return True
         except Exception:
@@ -288,20 +289,18 @@ def start_climate():
 
         opts = ClimateRequestOptions(duration, defrost)
         temp_applied = _apply_temperature(opts, temperature)
-        app.logger.info("/start_climate with duration=%s, defrost=%s, temp_applied=%s", duration, defrost, temp_applied)
+        app.logger.info("/start_climate with duration=%s, defrost=%s, temp=%s, temp_applied=%s", duration, defrost, temperature, temp_applied)
 
-        # Some NA vehicles require the vehicle to be locked before remote start
         try:
             vehicle_manager.lock(VEHICLE_ID)
         except Exception:
-            pass  # ignore locking errors; many EVs don't require it
+            pass
 
         try:
             res = vehicle_manager.start_climate(VEHICLE_ID, opts)
             return jsonify({"status": "climate_started", "result": res}), 200
         except Exception as e1:
             app.logger.exception("/start_climate first attempt failed: %s", e1)
-            # Quick fallback: retry with conservative options
             try:
                 opts2 = ClimateRequestOptions(5, False)
                 _apply_temperature(opts2, temperature)
@@ -313,7 +312,7 @@ def start_climate():
                 return jsonify({
                     "error": "Start climate failed",
                     "detail": detail,
-                    "debug": {"duration": duration, "defrost": defrost, "temp": temperature}
+                    "debug": {"duration": duration, "defrost": defrost, "temp": temperature, "units": temp_env_units}
                 }), 500
 
     except Exception as e:
