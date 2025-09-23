@@ -12,7 +12,12 @@ app = Flask(__name__)
 # Verbose logging to help diagnose issues in Vercel logs
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-app.logger.info("CLEANED_MAIN v3 loaded")
+try:
+    from importlib.metadata import version as _pkg_version  # py3.8+
+    _hkc_ver = _pkg_version("hyundai-kia-connect-api")
+except Exception:
+    _hkc_ver = "unknown"
+app.logger.info("CLEANED_MAIN v4 loaded (hyundai-kia-connect-api=%s)", _hkc_ver)
 
 # --------- Environment ---------
 USERNAME: Optional[str] = os.getenv("KIA_USERNAME")
@@ -27,40 +32,36 @@ if SECRET_KEY:
 # --------- Region/Brand resolution across library versions ---------
 
 def _resolve_region_brand():
-    """Return (region, brand) for VehicleManager, handling many lib versions.
-    Falls back to numeric envs KIA_REGION/KIA_BRAND (defaults 3/1).
+    """Return (region, brand) candidates for VehicleManager.
+    We return a *list* of candidates to try in order, to survive enum drift.
     """
+    candidates = []
     # Try newer-style enums
     try:
         from hyundai_kia_connect_api import Brand as _Brand, Region as _Region  # type: ignore
-        region = getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", None))
-        brand = getattr(_Brand, "KIA", None)
-        if region is not None and brand is not None:
-            return region, brand
+        if hasattr(_Region, "US"):
+            candidates.append((_Region.US, _Brand.KIA))
+        if hasattr(_Region, "NORTH_AMERICA"):
+            candidates.append((_Region.NORTH_AMERICA, _Brand.KIA))
     except Exception:
         pass
-
     # Try older-style enums under .const
     try:
         from hyundai_kia_connect_api.const import Brand as _Brand, Region as _Region  # type: ignore
-        region = getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", None))
-        brand = getattr(_Brand, "KIA", None)
-        if region is not None and brand is not None:
-            return region, brand
+        if hasattr(_Region, "US"):
+            candidates.append((_Region.US, _Brand.KIA))
+        if hasattr(_Region, "NORTH_AMERICA"):
+            candidates.append((_Region.NORTH_AMERICA, _Brand.KIA))
     except Exception:
         pass
-
-    # Fallback to integers (historically: region=3 (US/NA), brand=1 (KIA))
+    # Fallback to integers
     try:
         region_int = int(os.getenv("KIA_REGION", "3"))
         brand_int = int(os.getenv("KIA_BRAND", "1"))
     except Exception:
         region_int, brand_int = 3, 1
-    app.logger.warning(
-        "[init] Falling back to numeric region/brand (region=%s, brand=%s).",
-        region_int, brand_int,
-    )
-    return region_int, brand_int
+    candidates.append((region_int, brand_int))
+    return candidates
 
 # --------- Globals (lazy init) ---------
 vehicle_manager: Optional[VehicleManager] = None
@@ -68,11 +69,7 @@ init_error: Optional[str] = None
 
 
 def _init_vehicle_manager() -> None:
-    """One-time, robust initialization of the VehicleManager.
-    - Authenticates and updates state
-    - Auto-selects VEHICLE_ID if not provided
-    - Never hard-exits the process; stores error in `init_error`
-    """
+    """One-time, robust initialization of the VehicleManager with retries and fallbacks."""
     global vehicle_manager, init_error, VEHICLE_ID
 
     if vehicle_manager is not None:
@@ -87,42 +84,36 @@ def _init_vehicle_manager() -> None:
         init_error = f"Missing required env vars: {', '.join(missing)}"
         return
 
-    try:
-        region_val, brand_val = _resolve_region_brand()
-        vm = VehicleManager(
-            region=region_val,
-            brand=brand_val,
-            username=USERNAME,
-            password=PASSWORD,
-            pin=str(PIN),
-        )
+    import time
+    last_err = None
+    for attempt in range(1, 3):  # simple retry loop
+        for region_val, brand_val in _resolve_region_brand():
+            try:
+                app.logger.info("[init] Attempting to authenticate and refresh token… (attempt %d, region=%s, brand=%s)", attempt, region_val, brand_val)
+                vm = VehicleManager(
+                    region=region_val,
+                    brand=brand_val,
+                    username=USERNAME,
+                    password=PASSWORD,
+                    pin=str(PIN),
+                )
+                vm.check_and_refresh_token()
+                app.logger.info("[init] Token refreshed. Updating vehicle states…")
+                vm.update_all_vehicles_with_cached_state()
+                if not vm.vehicles:
+                    raise RuntimeError("Authenticated but no vehicles were returned by the API.")
+                if not VEHICLE_ID:
+                    VEHICLE_ID = next(iter(vm.vehicles.keys()))
+                    app.logger.info("[init] No VEHICLE_ID provided. Using first vehicle: %s", VEHICLE_ID)
+                vehicle_manager = vm
+                init_error = None
+                return
+            except Exception as e:
+                last_err = e
+                app.logger.error("[init] init attempt failed: %s", traceback.format_exc())
+        time.sleep(0.8)  # brief backoff
 
-        app.logger.info("[init] Attempting to authenticate and refresh token…")
-        vm.check_and_refresh_token()
-        app.logger.info("[init] Token refreshed. Updating vehicle states…")
-        try:
-            vm.update_all_vehicles_with_cached_state()
-        except Exception:
-            init_error_local = "Token refreshed, but failed to update vehicle state."
-            app.logger.error("[init] update_all_vehicles_with_cached_state() failed: %s", traceback.format_exc())
-            init_error = init_error_local
-            return
-
-        if not vm.vehicles:
-            init_error = "Authenticated but no vehicles were returned by the API."
-            app.logger.warning("[init] No vehicles returned after auth.")
-            return
-
-        if not VEHICLE_ID:
-            VEHICLE_ID = next(iter(vm.vehicles.keys()))
-            app.logger.info("[init] No VEHICLE_ID provided. Using first vehicle: %s", VEHICLE_ID)
-
-        vehicle_manager = vm
-        init_error = None
-
-    except Exception:
-        init_error = traceback.format_exc()
-        app.logger.error("Initialization failed: %s", init_error)
+    init_error = f"Initialization failed after retries: {last_err}"
 
 
 def ensure_initialized():
@@ -152,9 +143,19 @@ def debug_init():
     init_error = None
     _init_vehicle_manager()
     ok = vehicle_manager is not None
+    detail = None
+    if not ok:
+        detail = init_error
+    else:
+        try:
+            vehicle_ids = list(vehicle_manager.vehicles.keys())
+        except Exception:
+            vehicle_ids = []
     return jsonify({
         "ok": ok,
-        "init_error": init_error,
+        "init_error": detail,
+        "vehicle_ids": (vehicle_ids if ok else []),
+        "lib_version": _hkc_ver,
     }), (200 if ok else 500)
 
 
