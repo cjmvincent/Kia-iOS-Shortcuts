@@ -1,195 +1,230 @@
 import os
-import time
+import traceback
+from typing import Optional
+import logging
 from flask import Flask, request, jsonify
+
+# hyundai-kia-connect-api imports (enum locations vary by version)
 from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
-from hyundai_kia_connect_api.exceptions import AuthenticationError
+try:
+    from hyundai_kia_connect_api import Brand, Region  # newer versions
+except Exception:  # pragma: no cover
+    from hyundai_kia_connect_api.const import Brand, Region  # older versions
 
 app = Flask(__name__)
 
-USERNAME = os.environ.get('KIA_USERNAME')
-PASSWORD = os.environ.get('KIA_PASSWORD')
-PIN = os.environ.get('KIA_PIN')
-SECRET_KEY = os.environ.get("SECRET_KEY")
-VEHICLE_ID = os.environ.get("VEHICLE_ID")
+# Verbose logging to help diagnose library/HTTP issues in Vercel logs
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.WARNING)  # dial up to DEBUG if needed
 
-if not USERNAME or not PASSWORD or not PIN or not SECRET_KEY:
-    raise ValueError("Missing one or more required environment variables.")
+# --------- Environment ---------
+USERNAME: Optional[str] = os.getenv("KIA_USERNAME")
+PASSWORD: Optional[str] = os.getenv("KIA_PASSWORD")
+PIN: Optional[str] = os.getenv("KIA_PIN")
+SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
+VEHICLE_ID: Optional[str] = os.getenv("VEHICLE_ID")  # may be None -> we will auto-pick
 
-vehicle_manager = VehicleManager(
-    region=US,  # North America
-    brand=KIA,   # KIA
-    username=USERNAME,
-    password=PASSWORD,
-    pin=str(PIN)
-)
+# SECRET_KEY is optional for this API (only used by Flask sessions)
+if SECRET_KEY:
+    app.secret_key = SECRET_KEY
 
-try:
-    print("Attempting to authenticate and refresh token...")
-    vehicle_manager.check_and_refresh_token()
-    print("Token refreshed successfully.")
-    print("Updating vehicle states...")
-    vehicle_manager.update_all_vehicles_with_cached_state()
-    print(f"Connected! Found {len(vehicle_manager.vehicles)} vehicle(s).")
-except AuthenticationError as e:
-    print(f"Failed to authenticate: {e}")
-    exit(1)
-except Exception as e:
-    print(f"Unexpected error during initialization: {e}")
-    exit(1)
+# --------- Globals (lazy init) ---------
+vehicle_manager: Optional[VehicleManager] = None
+init_error: Optional[str] = None
 
-if not VEHICLE_ID:
-    if not vehicle_manager.vehicles:
-        raise ValueError("No vehicles found in the account.")
-    VEHICLE_ID = next(iter(vehicle_manager.vehicles.keys()))
-    print(f"No VEHICLE_ID provided. Using first vehicle: {VEHICLE_ID}")
 
-def parse_temperature(temp_obj):
+def _init_vehicle_manager() -> None:
+    """One-time, robust initialization of the VehicleManager.
+
+    - Uses explicit enums (Region.US / Brand.KIA) to avoid magic numbers
+    - Authenticates and updates state
+    - Auto-selects VEHICLE_ID if not provided
+    - Never hard-exits the process; stores error in `init_error`
+    """
+    global vehicle_manager, init_error, VEHICLE_ID
+
+    # Fast path: already healthy
+    if vehicle_manager is not None:
+        return
+
+    missing = [k for k, v in {
+        "KIA_USERNAME": USERNAME,
+        "KIA_PASSWORD": PASSWORD,
+        "KIA_PIN": PIN,
+    }.items() if not v]
+    if missing:
+        init_error = f"Missing required env vars: {', '.join(missing)}"
+        return
+
     try:
-        if isinstance(temp_obj, dict):
-            val = temp_obj.get('value')
-            if val is not None:
-                return float(val)
-        return None
-    except:
-        return None
+        vm = VehicleManager(
+            region=getattr(Region, "US", getattr(Region, "NORTH_AMERICA", Region.US)),
+            brand=Brand.KIA,
+            username=USERNAME,
+            password=PASSWORD,
+            pin=str(PIN),
+        )
+
+        # Authenticate and prime cache
+        app.logger.info("[init] Attempting to authenticate and refresh token…")
+        vm.check_and_refresh_token()
+        app.logger.info("[init] Token refreshed. Updating vehicle states…")
+        try:
+            vm.update_all_vehicles_with_cached_state()
+        except Exception:
+            # Capture the exact failure that happens *after* token refresh
+            app.logger.error("[init] update_all_vehicles_with_cached_state() failed:
+" + traceback.format_exc())
+            init_error = "Token refreshed, but failed to update vehicle state. See logs."
+            return
+
+        if not vm.vehicles:
+            init_error = "No vehicles found on this account after authentication."
+            return
+
+        # Auto-pick vehicle if not specified
+        if not VEHICLE_ID:
+            VEHICLE_ID = next(iter(vm.vehicles.keys()))
+            app.logger.info(f"No VEHICLE_ID provided. Using first vehicle: {VEHICLE_ID}")
+
+        # Commit only after success so we don't leave globals half-initialized
+        vehicle_manager = vm
+        init_error = None
+
+    except Exception:
+        init_error = traceback.format_exc()
+        app.logger.error("Initialization failed:\n" + init_error)
+
+
+def ensure_initialized():
+    """Ensure the global VehicleManager is ready; return (ok, message)."""
+    _init_vehicle_manager()
+    if vehicle_manager is None:
+        return False, (init_error or "Initialization did not complete.")
+    return True, "ok"
+
 
 @app.before_request
-def log_request_info():
-    print(f"Incoming request: {request.method} {request.url}")
+def _log_request():
+    app.logger.info(f"{request.method} {request.path}")
 
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({"status": "Welcome to the Kia Vehicle Control API"}), 200
 
-@app.route('/vehicle_status', methods=['GET'])
-def vehicle_status():
-    print("Received request to /vehicle_status")
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
+@app.get("/debug/init")
+def debug_init():
+    """Force a fresh init cycle and return detailed status for debugging."""
+    global vehicle_manager, init_error
+    vehicle_manager = None
+    init_error = None
+    _init_vehicle_manager()
+    ok = vehicle_manager is not None
+    return jsonify({
+        "ok": ok,
+        "init_error": init_error,
+    }), (200 if ok else 500)
+
+
+@app.get("/")
+def health():
+    ok, msg = ensure_initialized()
+    status = "ok" if ok else "error"
+    return jsonify({"status": status, "message": msg}), (200 if ok else 500)
+
+
+@app.get("/status")
+def status():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
 
     try:
         vehicle_manager.update_all_vehicles_with_cached_state()
-        vehicle = vehicle_manager.vehicles[VEHICLE_ID]
-        rpt = getattr(vehicle, 'vehicleStatusRpt', None)
+        v = vehicle_manager.vehicles.get(VEHICLE_ID)
+        if not v:
+            return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
 
-        if rpt:
-            vs = rpt.get('vehicleStatus', {})
-            climate = vs.get('climate', {})
-            distance = vs.get('distanceToEmpty', {})
-            fuel = vs.get('fuelLevel', None)
-            engine = vs.get('engine', None)
-            locked = vs.get('doorLock', None)
-            odometer = vs.get('odometer', {}).get('value', None)
+        # Return a compact snapshot of state
+        snapshot = {
+            "vehicle_id": VEHICLE_ID,
+            "name": getattr(v, "name", None),
+            "vin": getattr(v, "vin", None),
+            "odometer": getattr(v, "odometer", None),
+            "battery": getattr(v, "battery_level", None),
+            "charging": getattr(v, "is_charging", None),
+            "range": getattr(v, "ev_range", None),
+            "locked": getattr(v, "is_locked", None),
+            "timestamp": getattr(v, "last_update", None),
+        }
+        return jsonify(snapshot), 200
+    except Exception:
+        app.logger.exception("/status failed")
+        return jsonify({"error": "Failed to fetch status", "detail": traceback.format_exc()}), 500
 
-            status = {
-                "locked": locked,
-                "engineOn": engine,
-                "fuelLevel": fuel,
-                "interiorTemperature": parse_temperature(climate.get('airTemp')),
-                "acSetTemperature": parse_temperature(climate.get('heatingTemp')),
-                "rangeMiles": distance.get('value', None),
-                "odometer": odometer,
-                "climateOn": vs.get('airCtrl', None)
-            }
-        else:
-            status = {
-                "locked": getattr(vehicle, "is_locked", None),
-                "engineOn": getattr(vehicle, "engine_is_running", None),
-                "fuelLevel": getattr(vehicle, "fuel_level", None),
-                "interiorTemperature": getattr(vehicle, "interior_temperature", None),
-                "acSetTemperature": getattr(vehicle, "climate_temperature", None),
-                "rangeMiles": getattr(vehicle, "fuel_driving_range", None),
-                "odometer": getattr(vehicle, "odometer_value", None),
-                "climateOn": getattr(vehicle, "is_climate_on", None)
-            }
 
-        print(status)
-        return jsonify(status), 200
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"Error in /vehicle_status:\n{error_trace}")
-        return jsonify({"error": error_trace}), 500
-
-@app.route('/start_climate', methods=['POST'])
-def start_climate():
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-    try:
-        vehicle_manager.update_all_vehicles_with_cached_state()
-        climate_options = ClimateRequestOptions(set_temp=62, duration=10)
-        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
-        return jsonify({"status": "Climate started", "result": result}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
-
-@app.route('/stop_climate', methods=['POST'])
-def stop_climate():
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-    try:
-        vehicle_manager.update_all_vehicles_with_cached_state()
-        result = vehicle_manager.stop_climate(VEHICLE_ID)
-        return jsonify({"status": "Climate stopped", "result": result}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
-
-@app.route('/unlock_car', methods=['POST'])
-def unlock_car():
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-    try:
-        vehicle_manager.update_all_vehicles_with_cached_state()
-        result = vehicle_manager.unlock(VEHICLE_ID)
-        return jsonify({"status": "Car unlocked", "result": result}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
-
-@app.route('/lock_car', methods=['POST'])
+@app.post("/lock_car")
 def lock_car():
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
     try:
+        vehicle_manager.check_and_refresh_token()
         vehicle_manager.update_all_vehicles_with_cached_state()
-        result = vehicle_manager.lock(VEHICLE_ID)
-        return jsonify({"status": "Car locked", "result": result}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
+        res = vehicle_manager.lock(VEHICLE_ID)
+        return jsonify({"status": "locked", "result": res}), 200
+    except Exception:
+        app.logger.exception("/lock_car failed")
+        return jsonify({"error": "Lock failed", "detail": traceback.format_exc()}), 500
 
-@app.route('/aftermarket_trunk', methods=['POST'])
-def aftermarket_trunk():
-    print("Received request to /aftermarket_trunk")
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
-    try:
-        results = []
-        for i in range(3):
-            result = vehicle_manager.unlock(VEHICLE_ID)
-            results.append(result)
-            time.sleep(1)
-        return jsonify({"status": "Aftermarket trunk opened", "results": results}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
 
-@app.route('/start_heating', methods=['POST'])
-def start_heating():
-    print("Received request to /start_heating")
-    if request.headers.get("Authorization") != SECRET_KEY:
-        return jsonify({"error": "Unauthorized"}), 403
+@app.post("/unlock_car")
+def unlock_car():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
     try:
+        vehicle_manager.check_and_refresh_token()
         vehicle_manager.update_all_vehicles_with_cached_state()
-        climate_options = ClimateRequestOptions(set_temp=80, duration=10)
-        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
-        return jsonify({"status": "Heating started (80°F)", "result": result}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": traceback.format_exc()}), 500
+        res = vehicle_manager.unlock(VEHICLE_ID)
+        return jsonify({"status": "unlocked", "result": res}), 200
+    except Exception:
+        app.logger.exception("/unlock_car failed")
+        return jsonify({"error": "Unlock failed", "detail": traceback.format_exc()}), 500
 
+
+@app.post("/start_climate")
+def start_climate():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
+
+    # Optional JSON body: {"duration": 10, "defrost": false}
+    body = request.get_json(silent=True) or {}
+    duration = int(body.get("duration", 10))  # minutes
+    defrost = bool(body.get("defrost", False))
+
+    try:
+        vehicle_manager.check_and_refresh_token()
+        opts = ClimateRequestOptions(duration, defrost)
+        res = vehicle_manager.start_climate(VEHICLE_ID, opts)
+        return jsonify({"status": "climate_started", "result": res}), 200
+    except Exception:
+        app.logger.exception("/start_climate failed")
+        return jsonify({"error": "Start climate failed", "detail": traceback.format_exc()}), 500
+
+
+@app.post("/stop_climate")
+def stop_climate():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
+    try:
+        vehicle_manager.check_and_refresh_token()
+        res = vehicle_manager.stop_climate(VEHICLE_ID)
+        return jsonify({"status": "climate_stopped", "result": res}), 200
+    except Exception:
+        app.logger.exception("/stop_climate failed")
+        return jsonify({"error": "Stop climate failed", "detail": traceback.format_exc()}), 500
+
+
+# For local dev (Vercel will ignore this block and use the WSGI app)
 if __name__ == "__main__":
-    print("Starting Kia Vehicle Control API...")
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
