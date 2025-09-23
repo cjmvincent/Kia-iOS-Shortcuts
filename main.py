@@ -237,17 +237,92 @@ def start_climate():
     ok, msg = ensure_initialized()
     if not ok:
         return jsonify({"error": msg}), 500
+
+    # Body may include: duration (1-30), defrost (bool), temperature (int, F or C depending on lib/vehicle)
     body = request.get_json(silent=True) or {}
-    duration = int(body.get("duration", 10))
+    try:
+        duration = int(body.get("duration", 10))
+    except Exception:
+        duration = 10
+    duration = max(1, min(duration, 30))
     defrost = bool(body.get("defrost", False))
+    temperature = body.get("temperature")  # optional
+
+    def _apply_temperature(opts, temp):  # set if supported by library version
+        try:
+            if temp is not None:
+                # Common attribute names seen across versions
+                for name in ("temperature", "target_temperature", "set_temperature"):
+                    if not hasattr(opts, name):
+                        continue
+                    setattr(opts, name, temp)
+                    return True
+        except Exception:
+            pass
+        return False
+
     try:
         vehicle_manager.check_and_refresh_token()
+        vehicle_manager.update_all_vehicles_with_cached_state()
+
         opts = ClimateRequestOptions(duration, defrost)
-        res = vehicle_manager.start_climate(VEHICLE_ID, opts)
-        return jsonify({"status": "climate_started", "result": res}), 200
+        temp_applied = _apply_temperature(opts, temperature)
+        app.logger.info("/start_climate with duration=%s, defrost=%s, temp_applied=%s", duration, defrost, temp_applied)
+
+        # Some NA vehicles require the vehicle to be locked before remote start
+        try:
+            vehicle_manager.lock(VEHICLE_ID)
+        except Exception:
+            pass  # ignore locking errors; many EVs don't require it
+
+        try:
+            res = vehicle_manager.start_climate(VEHICLE_ID, opts)
+            return jsonify({"status": "climate_started", "result": res}), 200
+        except Exception as e1:
+            app.logger.exception("/start_climate first attempt failed: %s", e1)
+            # Quick fallback: retry with conservative options
+            try:
+                opts2 = ClimateRequestOptions(5, False)
+                _apply_temperature(opts2, temperature)
+                res2 = vehicle_manager.start_climate(VEHICLE_ID, opts2)
+                return jsonify({"status": "climate_started", "result": res2, "note": "fallback options used"}), 200
+            except Exception as e2:
+                app.logger.exception("/start_climate fallback failed: %s", e2)
+                detail = getattr(e2, "response", None) or getattr(e1, "response", None) or str(e2)
+                return jsonify({
+                    "error": "Start climate failed",
+                    "detail": detail,
+                    "debug": {"duration": duration, "defrost": defrost, "temp": temperature}
+                }), 500
+
+    except Exception as e:
+        app.logger.exception("/start_climate failed before request: %s", e)
+        return jsonify({"error": "Start climate precheck failed", "detail": traceback.format_exc()}), 500
+
+
+@app.get("/debug/capabilities")
+def debug_capabilities():
+    """Return basic capability hints from the vehicle object (if exposed by the lib)."""
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
+    try:
+        vehicle_manager.update_all_vehicles_with_cached_state()
+        v = vehicle_manager.vehicles.get(VEHICLE_ID)
+        if not v:
+            return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
+        caps = {
+            "supports_remote_start": getattr(v, "supports_remote_start", None),
+            "supports_climate": getattr(v, "supports_climate", None),
+            "is_ev": getattr(v, "is_ev", None),
+            "engine_type": getattr(v, "engine_type", None),
+            "model": getattr(v, "model", None),
+            "year": getattr(v, "year", None),
+        }
+        return jsonify(caps), 200
     except Exception:
-        app.logger.exception("/start_climate failed")
-        return jsonify({"error": "Start climate failed", "detail": traceback.format_exc()}), 500
+        app.logger.exception("/debug/capabilities failed")
+        return jsonify({"error": "Failed to read capabilities", "detail": traceback.format_exc()}), 500
 
 
 @app.post("/stop_climate")
