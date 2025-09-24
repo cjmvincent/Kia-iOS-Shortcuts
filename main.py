@@ -15,8 +15,8 @@ PIN: Optional[str] = os.getenv("KIA_PIN")
 SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
 VEHICLE_ID: Optional[str] = os.getenv("VEHICLE_ID")
 
-if SECRET_KEY:
-    app.secret_key = SECRET_KEY
+if not USERNAME or not PASSWORD or not PIN or not SECRET_KEY:
+    raise ValueError("Missing one or more required environment variables.")
 
 # --------- Region/Brand fallback ---------
 def _resolve_region_brand():
