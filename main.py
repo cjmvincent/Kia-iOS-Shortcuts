@@ -3,9 +3,8 @@ import traceback
 import logging
 from typing import Optional
 from flask import Flask, request, jsonify
-
-# hyundai-kia-connect-api
 from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
+from hyundai_kia_connect_api.exceptions import AuthenticationError
 
 app = Flask(__name__)
 
