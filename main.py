@@ -18,17 +18,17 @@ VEHICLE_ID: Optional[str] = os.getenv("VEHICLE_ID")
 if not USERNAME or not PASSWORD or not PIN or not SECRET_KEY:
     raise ValueError("Missing one or more required environment variables.")
 
-# --------- Region/Brand fallback ---------
-def _resolve_region_brand():
-    try:
-        from hyundai_kia_connect_api import Brand as _Brand, Region as _Region
-        return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
-    except Exception:
-        try:
-            from hyundai_kia_connect_api.const import Brand as _Brand, Region as _Region
-            return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
-        except Exception:
-            return int(os.getenv("KIA_REGION", "3")), int(os.getenv("KIA_BRAND", "1"))
+# # --------- Region/Brand fallback ---------
+# def _resolve_region_brand():
+#     try:
+#         from hyundai_kia_connect_api import Brand as _Brand, Region as _Region
+#         return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
+#     except Exception:
+#         try:
+#             from hyundai_kia_connect_api.const import Brand as _Brand, Region as _Region
+#             return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
+#         except Exception:
+#             return int(os.getenv("KIA_REGION", "3")), int(os.getenv("KIA_BRAND", "1"))
 
 # --------- Globals ---------
 vehicle_manager: Optional[VehicleManager] = None
