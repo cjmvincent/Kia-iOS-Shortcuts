@@ -151,7 +151,7 @@ def status_text():
     if ignition_on or climate_on:
         run_clause = " The car and climate are running."
 
-    sentence = f"{name} is currently {lock_status}, and {run_clause}. {charging_clause}.{battery_clause}."
+    sentence = f"{name} is currently {lock_status}. {charging_clause}.{battery_clause}."
     return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.post("/lock_car")
