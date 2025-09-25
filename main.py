@@ -116,18 +116,73 @@ def start_climate():
     ok, msg = ensure_initialized()
     if not ok:
         return jsonify({"error": msg}), 500
+
     body = request.get_json(silent=True) or {}
-    duration = max(1, min(int(body.get("duration", 10)), 30))
-    defrost = bool(body.get("defrost", False))
-    temperature = body.get("temperature", 72)
+    # duration 1..30 minutes
     try:
-        opts = ClimateRequestOptions(duration=duration, defrost=defrost, climate=True, heating=True, set_temp=temperature, force=True)
-    except TypeError:
-        opts = ClimateRequestOptions(duration, defrost)
-        if hasattr(opts, "set_temperature"):
-            setattr(opts, "set_temperature", temperature)
-    res = vehicle_manager.start_climate(VEHICLE_ID, opts)
-    return jsonify({"status": "climate_started", "result": res}), 200
+        duration = int(body.get("duration", 10))
+    except Exception:
+        duration = 10
+    duration = max(1, min(duration, 30))
+    defrost = bool(body.get("defrost", False))
+    # default temp; set CLIMATE_DEGREES=C in env if your car uses °C
+    units = os.getenv("CLIMATE_DEGREES", "F").upper()
+    temperature = body.get("temperature", (22 if units == "C" else 72))
+
+    # Build options with constructor first; fall back to setting attributes
+    def build_opts(_duration, _defrost, _temp):
+        try:
+            return ClimateRequestOptions(
+                duration=_duration,
+                defrost=_defrost,
+                climate=True,
+                heating=True,
+                set_temp=_temp,
+            )
+        except TypeError:
+            # Older sig: ClimateRequestOptions(duration, defrost)
+            opts = ClimateRequestOptions(_duration, _defrost)
+            for name in ("set_temperature", "target_temperature", "temperature", "targetTemperature"):
+                if hasattr(opts, name):
+                    setattr(opts, name, _temp)
+                    break
+            return opts
+
+    try:
+        # Keep session fresh and state current
+        vehicle_manager.check_and_refresh_token()
+        vehicle_manager.update_all_vehicles_with_cached_state()
+
+        # Some NA trims require locked doors before remote start/climate
+        try:
+            vehicle_manager.lock(VEHICLE_ID)
+        except Exception:
+            pass  # ignore if not required/already locked
+
+        # First attempt with requested options
+        opts = build_opts(duration, defrost, temperature)
+        try:
+            res = vehicle_manager.start_climate(VEHICLE_ID, opts)
+            return jsonify({"status": "climate_started", "result": res}), 200
+        except Exception as e1:
+            # Fallback: shorter duration & defrost off
+            try:
+                opts2 = build_opts(5, False, temperature)
+                res2 = vehicle_manager.start_climate(VEHICLE_ID, opts2)
+                return jsonify({"status": "climate_started", "result": res2, "note": "fallback options used"}), 200
+            except Exception as e2:
+                # Graceful JSON error (don’t 500 the whole app)
+                detail = getattr(e2, "response", None) or getattr(e1, "response", None) or str(e2)
+                return jsonify({
+                    "error": "Start climate failed",
+                    "detail": detail,
+                    "debug": {"duration": duration, "defrost": defrost, "temperature": temperature, "units": units}
+                }), 400
+
+    except Exception as e:
+        # Any unexpected failure -> clean JSON, not an Internal Server Error
+        return jsonify({"error": "Start climate precheck failed", "detail": str(e)}), 400
+
 
 @app.post("/stop_climate")
 def stop_climate():
