@@ -149,17 +149,10 @@ def status_text():
     climate_on = getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None)
 
     if ignition_on or climate_on:
-        run_clause = " The car and climate are on."
-    else:
-        # If both are explicitly False -> off; if unknown, omit the clause
-        if ignition_on is False and climate_on is False:
-            run_clause = " The car is off and climate is off."
-        else:
-            run_clause = ""
+        run_clause = " The car and climate are running."
 
-    sentence = f"{name} is currently {lock_status} {charging_clause}.{battery_clause}{run_clause}"
+    sentence = f"{name} is currently {lock_status}, and {run_clause}. {charging_clause}.{battery_clause}."
     return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
-
 
 @app.post("/lock_car")
 def lock_car():
