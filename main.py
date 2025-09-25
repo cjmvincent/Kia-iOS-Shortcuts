@@ -121,7 +121,7 @@ def start_climate():
     defrost = bool(body.get("defrost", False))
     temperature = body.get("temperature", 72)
     try:
-        opts = ClimateRequestOptions(duration=duration, defrost=defrost, climate=True, heating=True, set_temp=temperature)
+        opts = ClimateRequestOptions(duration=duration, defrost=defrost, climate=True, heating=True, set_temp=temperature, force=true)
     except TypeError:
         opts = ClimateRequestOptions(duration, defrost)
         if hasattr(opts, "set_temperature"):
