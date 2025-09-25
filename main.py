@@ -95,8 +95,32 @@ def health():
 #     }
 #     return jsonify(snapshot), 200
 
+@app.get("/status.json")
+def status_json():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
+
+    vehicle_manager.update_all_vehicles_with_cached_state()
+    v = vehicle_manager.vehicles.get(VEHICLE_ID)
+    if not v:
+        return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
+
+    payload = {
+        "vehicle_id": VEHICLE_ID,
+        "name": getattr(v, "name", None) or "Your car",
+        "locked": getattr(v, "is_locked", None),
+        "charging": getattr(v, "is_charging", None),
+        "battery": getattr(v, "battery_level", None),
+        "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
+        "climate_on": getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None),
+        "timestamp": getattr(v, "last_update", None),
+    }
+    return jsonify(payload), 200
+
+
 @app.get("/status")
-def status():
+def status_text():
     ok, msg = ensure_initialized()
     if not ok:
         return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
@@ -104,20 +128,38 @@ def status():
     vehicle_manager.update_all_vehicles_with_cached_state()
     v = vehicle_manager.vehicles.get(VEHICLE_ID)
     if not v:
-        return f"Vehicle {VEHICLE_ID} not found.", 404, {"Content-Type": "text/plain; charset=utf-8"}
+        return (
+            f"Vehicle {VEHICLE_ID} not found.",
+            404,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
 
-    name = getattr(v, "name", "Your car")
+    name = getattr(v, "name", None) or "Your car"
+
     locked = getattr(v, "is_locked", None)
-    lock_status = "locked" if locked else "unlocked"
+    lock_status = "locked" if locked else "unlocked" if locked is not None else "with unknown lock state"
 
     charging = getattr(v, "is_charging", None)
-    charging_status = "and charging" if charging else "and not charging"
+    charging_clause = "and charging" if charging else "and not charging" if charging is not None else "and charging status unknown"
 
     battery = getattr(v, "battery_level", None)
-    battery_str = f" Battery is at {battery}%." if battery is not None else ""
+    battery_clause = f" Battery is at {battery}%." if battery is not None else ""
 
-    sentence = f"{name} is currently {lock_status} {charging_status}.{battery_str}"
+    ignition_on = getattr(v, "ignition_on", None) or getattr(v, "engine_on", None)
+    climate_on = getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None)
+
+    if ignition_on or climate_on:
+        run_clause = " The car and climate are on."
+    else:
+        # If both are explicitly False -> off; if unknown, omit the clause
+        if ignition_on is False and climate_on is False:
+            run_clause = " The car is off and climate is off."
+        else:
+            run_clause = ""
+
+    sentence = f"{name} is currently {lock_status} {charging_clause}.{battery_clause}{run_clause}"
     return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
 
 @app.post("/lock_car")
 def lock_car():
