@@ -118,7 +118,6 @@ def status_json():
     }
     return jsonify(payload), 200
 
-
 @app.get("/status")
 def status_text():
     ok, msg = ensure_initialized()
@@ -128,30 +127,47 @@ def status_text():
     vehicle_manager.update_all_vehicles_with_cached_state()
     v = vehicle_manager.vehicles.get(VEHICLE_ID)
     if not v:
-        return (
-            f"Vehicle {VEHICLE_ID} not found.",
-            404,
-            {"Content-Type": "text/plain; charset=utf-8"},
-        )
+        return (f"Vehicle {VEHICLE_ID} not found.", 404,
+                {"Content-Type": "text/plain; charset=utf-8"})
 
     name = getattr(v, "name", None) or "Your car"
 
+    # Lock
     locked = getattr(v, "is_locked", None)
-    lock_status = "locked" if locked else "unlocked" if locked is not None else "with unknown lock state"
+    lock_status = (
+        "locked" if locked is True
+        else "unlocked" if locked is False
+        else "with unknown lock state"
+    )
 
+    # Charging
     charging = getattr(v, "is_charging", None)
-    charging_clause = "and charging" if charging else "and not charging" if charging is not None else "and charging status unknown"
+    charging_clause = (
+        "and charging" if charging is True
+        else "and not charging" if charging is False
+        else "and charging status unknown"
+    )
 
+    # Battery
     battery = getattr(v, "battery_level", None)
     battery_clause = f" Battery is at {battery}%." if battery is not None else ""
 
+    # Ignition / climate
     ignition_on = getattr(v, "ignition_on", None) or getattr(v, "engine_on", None)
     climate_on = getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None)
 
-    if ignition_on or climate_on:
-        run_clause = " The car and climate are running."
+    if ignition_on is True and climate_on is True:
+        run_clause = " The car and climate are on."
+    elif ignition_on is True and climate_on is False:
+        run_clause = " The car is on and climate is off."
+    elif ignition_on is False and climate_on is True:
+        run_clause = " The car is off and climate is on."
+    elif ignition_on is False and climate_on is False:
+        run_clause = " The car and climate are off."
+    else:
+        run_clause = ""  # unknown states, keep it clean
 
-    sentence = f"{name} is currently {lock_status}. {charging_clause}.{battery_clause}."
+    sentence = f"{name} is currently {lock_status} {charging_clause}.{battery_clause}{run_clause}"
     return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.post("/lock_car")
