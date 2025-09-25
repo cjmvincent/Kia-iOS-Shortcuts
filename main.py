@@ -73,27 +73,51 @@ def health():
     ok, msg = ensure_initialized()
     return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 500)
 
+# @app.get("/status")
+# def status():
+#     ok, msg = ensure_initialized()
+#     if not ok:
+#         return jsonify({"error": msg}), 500
+#     vehicle_manager.update_all_vehicles_with_cached_state()
+#     v = vehicle_manager.vehicles.get(VEHICLE_ID)
+#     if not v:
+#         return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
+#     snapshot = {
+#         "vehicle_id": VEHICLE_ID,
+#         "name": getattr(v, "name", None),
+#         "vin": getattr(v, "vin", None),
+#         "odometer": getattr(v, "odometer", None),
+#         "battery": getattr(v, "battery_level", None),
+#         "charging": getattr(v, "is_charging", None),
+#         "range": getattr(v, "ev_range", None),
+#         "locked": getattr(v, "is_locked", None),
+#         "timestamp": getattr(v, "last_update", None),
+#     }
+#     return jsonify(snapshot), 200
+
 @app.get("/status")
 def status():
     ok, msg = ensure_initialized()
     if not ok:
-        return jsonify({"error": msg}), 500
+        return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
+
     vehicle_manager.update_all_vehicles_with_cached_state()
     v = vehicle_manager.vehicles.get(VEHICLE_ID)
     if not v:
-        return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
-    snapshot = {
-        "vehicle_id": VEHICLE_ID,
-        "name": getattr(v, "name", None),
-        "vin": getattr(v, "vin", None),
-        "odometer": getattr(v, "odometer", None),
-        "battery": getattr(v, "battery_level", None),
-        "charging": getattr(v, "is_charging", None),
-        "range": getattr(v, "ev_range", None),
-        "locked": getattr(v, "is_locked", None),
-        "timestamp": getattr(v, "last_update", None),
-    }
-    return jsonify(snapshot), 200
+        return f"Vehicle {VEHICLE_ID} not found.", 404, {"Content-Type": "text/plain; charset=utf-8"}
+
+    name = getattr(v, "name", "Your car")
+    locked = getattr(v, "is_locked", None)
+    lock_status = "locked" if locked else "unlocked"
+
+    charging = getattr(v, "is_charging", None)
+    charging_status = "and charging" if charging else "and not charging"
+
+    battery = getattr(v, "battery_level", None)
+    battery_str = f" Battery is at {battery}%." if battery is not None else ""
+
+    sentence = f"{name} is currently {lock_status} {charging_status}.{battery_str}"
+    return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.post("/lock_car")
 def lock_car():
@@ -193,4 +217,5 @@ def stop_climate():
     return jsonify({"status": "climate_stopped", "result": res}), 200
 
 if __name__ == "__main__":
+    print("Starting Kia Vehicle Control API...")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
