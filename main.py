@@ -1,10 +1,8 @@
 import os
-import time
 import traceback
 from typing import Optional
 from flask import Flask, request, jsonify
 from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
-from hyundai_kia_connect_api.exceptions import AuthenticationError
 
 app = Flask(__name__)
 
@@ -15,52 +13,48 @@ PIN: Optional[str] = os.getenv("KIA_PIN")
 SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
 VEHICLE_ID: Optional[str] = os.getenv("VEHICLE_ID")
 
+# Region/Brand via environment (integers). Common historical values: 3=US/NA, 1=Kia.
+REGION: int = int(os.getenv("KIA_REGION", "3"))
+BRAND: int = int(os.getenv("KIA_BRAND", "1"))
+
 if not USERNAME or not PASSWORD or not PIN or not SECRET_KEY:
     raise ValueError("Missing one or more required environment variables.")
 
-# --------- Region/Brand fallback ---------
-def _resolve_region_brand():
-    try:
-        from hyundai_kia_connect_api import Brand as _Brand, Region as _Region
-        return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
-    except Exception:
-        try:
-            from hyundai_kia_connect_api.const import Brand as _Brand, Region as _Region
-            return getattr(_Region, "US", getattr(_Region, "NORTH_AMERICA", 3)), _Brand.KIA
-        except Exception:
-            return int(os.getenv("KIA_REGION", "3")), int(os.getenv("KIA_BRAND", "1"))
+app.secret_key = SECRET_KEY
 
 # --------- Globals ---------
 vehicle_manager: Optional[VehicleManager] = None
 init_error: Optional[str] = None
 
+
 def _init_vehicle_manager():
+    """One-time initialization of VehicleManager with simple, predictable behavior."""
     global vehicle_manager, init_error, VEHICLE_ID
     if vehicle_manager is not None:
         return
-    if not USERNAME or not PASSWORD or not PIN:
-        init_error = "Missing required env vars"
-        return
     try:
-        region_val, brand_val = _resolve_region_brand()
         vm = VehicleManager(
-            region=region_val,
-            brand=brand_val,
+            region=REGION,
+            brand=BRAND,
             username=USERNAME,
             password=PASSWORD,
             pin=str(PIN),
         )
         vm.check_and_refresh_token()
         vm.update_all_vehicles_with_cached_state()
+
         if not vm.vehicles:
             init_error = "No vehicles found"
             return
+
         if not VEHICLE_ID:
             VEHICLE_ID = next(iter(vm.vehicles.keys()))
+
         vehicle_manager = vm
         init_error = None
     except Exception:
         init_error = traceback.format_exc()
+
 
 def ensure_initialized():
     _init_vehicle_manager()
@@ -68,12 +62,38 @@ def ensure_initialized():
         return False, (init_error or "Initialization failed")
     return True, "ok"
 
+
 @app.get("/")
 def health():
     ok, msg = ensure_initialized()
     return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 500)
 
-# --------- Get current startus of the vehicle ---------
+
+# --------- Status (JSON + Text) ---------
+@app.get("/status.json")
+def status_json():
+    ok, msg = ensure_initialized()
+    if not ok:
+        return jsonify({"error": msg}), 500
+
+    vehicle_manager.update_all_vehicles_with_cached_state()
+    v = vehicle_manager.vehicles.get(VEHICLE_ID)
+    if not v:
+        return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
+
+    payload = {
+        "vehicle_id": VEHICLE_ID,
+        "name": getattr(v, "name", None) or "Your car",
+        "locked": getattr(v, "is_locked", None),
+        "charging": getattr(v, "is_charging", None),
+        "battery": getattr(v, "battery_level", None),
+        "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
+        "climate_on": getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None),
+        "timestamp": getattr(v, "last_update", None),
+    }
+    return jsonify(payload), 200
+
+
 @app.get("/status")
 def status_text():
     ok, msg = ensure_initialized()
@@ -88,7 +108,6 @@ def status_text():
 
     name = getattr(v, "name", None) or "Your car"
 
-    # Lock
     locked = getattr(v, "is_locked", None)
     lock_status = (
         "locked" if locked is True
@@ -96,7 +115,6 @@ def status_text():
         else "with unknown lock state"
     )
 
-    # Charging
     charging = getattr(v, "is_charging", None)
     charging_clause = (
         "and charging" if charging is True
@@ -104,11 +122,9 @@ def status_text():
         else "and charging status unknown"
     )
 
-    # Battery
     battery = getattr(v, "battery_level", None)
     battery_clause = f" Battery is at {battery}%." if battery is not None else ""
 
-    # Ignition / climate
     ignition_on = getattr(v, "ignition_on", None) or getattr(v, "engine_on", None)
     climate_on = getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None)
 
@@ -121,12 +137,13 @@ def status_text():
     elif ignition_on is False and climate_on is False:
         run_clause = " The car and climate are off."
     else:
-        run_clause = "and run status us unknown"
+        run_clause = ""
 
     sentence = f"{name} is currently {lock_status} {charging_clause}.{battery_clause}{run_clause}"
     return sentence, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# --------- Lock the vehicle ---------
+
+# --------- Lock / Unlock (Text) ---------
 @app.post("/lock_car")
 def lock_car():
     ok, msg = ensure_initialized()
@@ -140,7 +157,7 @@ def lock_car():
     except Exception:
         return "There was an issue locking the car.", 400, {"Content-Type": "text/plain; charset=utf-8"}
 
-# --------- Unlock the vehicle ---------
+
 @app.post("/unlock_car")
 def unlock_car():
     ok, msg = ensure_initialized()
@@ -154,7 +171,8 @@ def unlock_car():
     except Exception:
         return "There was an issue unlocking the car.", 400, {"Content-Type": "text/plain; charset=utf-8"}
 
-# --------- Start the vehicle or climate ---------
+
+# --------- Start / Stop Climate (Text) ---------
 @app.post("/start_climate")
 def start_climate():
     ok, msg = ensure_initialized()
@@ -162,16 +180,20 @@ def start_climate():
         return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
 
     body = request.get_json(silent=True) or {}
+    # duration 1..30 minutes
     try:
         duration = int(body.get("duration", 10))
     except Exception:
         duration = 10
     duration = max(1, min(duration, 30))
     defrost = bool(body.get("defrost", False))
+    # default temp; set CLIMATE_DEGREES=C in env if your car uses °C
     units = os.getenv("CLIMATE_DEGREES", "F").upper()
-    temperature = body.get("temperature", 22 if units == "C" else 72)
+    temperature = body.get("temperature", (22 if units == "C" else 72))
 
+    # Helpers
     def build_opts(_duration, _defrost, _temp):
+        # Prefer newer constructor signature; fall back to older then setattr
         try:
             return ClimateRequestOptions(
                 duration=_duration,
@@ -188,34 +210,99 @@ def start_climate():
                     break
             return opts
 
+    def snapshot(v):
+        # Normalize across versions
+        return {
+            "locked": getattr(v, "is_locked", None),
+            "any_door_open": getattr(v, "is_any_door_open", None) or getattr(v, "door_open", None),
+            "hood_open": getattr(v, "hood_open", None) or getattr(v, "is_hood_open", None),
+            "trunk_open": getattr(v, "trunk_open", None) or getattr(v, "is_trunk_open", None) or getattr(v, "is_tailgate_open", None),
+            "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
+            "gear": getattr(v, "gear", None) or getattr(v, "transmission_gear", None) or getattr(v, "gear_position", None),
+        }
+
+    def preflight(v):
+        s = snapshot(v)
+        missing = []
+        # attempt to lock if unlocked
+        if s["locked"] is False:
+            try:
+                vehicle_manager.lock(VEHICLE_ID)
+                vehicle_manager.update_all_vehicles_with_cached_state()
+                s = snapshot(v)
+            except Exception:
+                pass
+        if s["locked"] is False:
+            missing.append("Doors must be locked")
+        if s["any_door_open"] is True:
+            missing.append("All doors must be closed")
+        if s["hood_open"] is True:
+            missing.append("Hood must be closed")
+        if s["trunk_open"] is True:
+            missing.append("Trunk/tailgate must be closed")
+        if s["ignition_on"] is True:
+            missing.append("Ignition/ACC must be off")
+        gear = s["gear"]
+        if gear not in (None, "P", "Park", "park", 0):
+            missing.append("Transmission must be in Park")
+        return missing
+
     try:
+        # Keep session fresh and state current
         vehicle_manager.check_and_refresh_token()
         vehicle_manager.update_all_vehicles_with_cached_state()
 
-        opts = build_opts(duration, defrost, temperature)
-        res = vehicle_manager.start_climate(VEHICLE_ID, opts)
-        name = getattr(vehicle_manager.vehicles.get(VEHICLE_ID), "name", "Your car")
-        return (
-            f"{name}'s climate has been started for {duration} minutes at {temperature}°{units}.",
-            200,
-            {"Content-Type": "text/plain; charset=utf-8"},
-        )
-    except Exception as e:
-        return (
-            f"Failed to start climate: {str(e)}",
-            400,
-            {"Content-Type": "text/plain; charset=utf-8"},
-        )
+        v = vehicle_manager.vehicles.get(VEHICLE_ID)
+        if not v:
+            return "Vehicle not found.", 404, {"Content-Type": "text/plain; charset=utf-8"}
 
-# --------- Turn off the vehicle or climate ---------
+        missing = preflight(v)
+        if missing:
+            return (
+                "Preconditions not met: " + "; ".join(missing) + ".",
+                400,
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
+
+        # Attempt
+        try:
+            res = vehicle_manager.start_climate(VEHICLE_ID, build_opts(duration, defrost, temperature))
+            name = getattr(v, "name", "Your car")
+            return (
+                f"{name}'s climate has been started for {duration} minutes at {temperature}°{units}.",
+                200,
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
+        except Exception:
+            # Fallback attempt
+            try:
+                vehicle_manager.start_climate(VEHICLE_ID, build_opts(5, False, temperature))
+                name = getattr(v, "name", "Your car")
+                return (
+                    f"{name}'s climate has been started for 5 minutes at {temperature}°{units}.",
+                    200,
+                    {"Content-Type": "text/plain; charset=utf-8"},
+                )
+            except Exception:
+                return "There was an issue starting climate.", 400, {"Content-Type": "text/plain; charset=utf-8"}
+
+    except Exception:
+        return "There was an issue starting climate.", 400, {"Content-Type": "text/plain; charset=utf-8"}
+
+
 @app.post("/stop_climate")
 def stop_climate():
     ok, msg = ensure_initialized()
     if not ok:
-        return jsonify({"error": msg}), 500
-    res = vehicle_manager.stop_climate(VEHICLE_ID)
-    return jsonify({"status": "climate_stopped", "result": res}), 200
+        return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
+
+    name = getattr(vehicle_manager.vehicles.get(VEHICLE_ID), "name", "Your car")
+    try:
+        vehicle_manager.stop_climate(VEHICLE_ID)
+        return f"{name}'s climate has been stopped.", 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception:
+        return "There was an issue stopping climate.", 400, {"Content-Type": "text/plain; charset=utf-8"}
+
 
 if __name__ == "__main__":
-    print("Starting Kia Vehicle Control API...")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
