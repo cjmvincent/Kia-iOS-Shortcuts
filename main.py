@@ -73,51 +73,6 @@ def health():
     ok, msg = ensure_initialized()
     return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 500)
 
-# @app.get("/status")
-# def status():
-#     ok, msg = ensure_initialized()
-#     if not ok:
-#         return jsonify({"error": msg}), 500
-#     vehicle_manager.update_all_vehicles_with_cached_state()
-#     v = vehicle_manager.vehicles.get(VEHICLE_ID)
-#     if not v:
-#         return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
-#     snapshot = {
-#         "vehicle_id": VEHICLE_ID,
-#         "name": getattr(v, "name", None),
-#         "vin": getattr(v, "vin", None),
-#         "odometer": getattr(v, "odometer", None),
-#         "battery": getattr(v, "battery_level", None),
-#         "charging": getattr(v, "is_charging", None),
-#         "range": getattr(v, "ev_range", None),
-#         "locked": getattr(v, "is_locked", None),
-#         "timestamp": getattr(v, "last_update", None),
-#     }
-#     return jsonify(snapshot), 200
-
-@app.get("/status.json")
-def status_json():
-    ok, msg = ensure_initialized()
-    if not ok:
-        return jsonify({"error": msg}), 500
-
-    vehicle_manager.update_all_vehicles_with_cached_state()
-    v = vehicle_manager.vehicles.get(VEHICLE_ID)
-    if not v:
-        return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
-
-    payload = {
-        "vehicle_id": VEHICLE_ID,
-        "name": getattr(v, "name", None) or "Your car",
-        "locked": getattr(v, "is_locked", None),
-        "charging": getattr(v, "is_charging", None),
-        "battery": getattr(v, "battery_level", None),
-        "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
-        "climate_on": getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None),
-        "timestamp": getattr(v, "last_update", None),
-    }
-    return jsonify(payload), 200
-
 @app.get("/status")
 def status_text():
     ok, msg = ensure_initialized()
