@@ -129,17 +129,27 @@ def status_text():
 def lock_car():
     ok, msg = ensure_initialized()
     if not ok:
-        return jsonify({"error": msg}), 500
-    res = vehicle_manager.lock(VEHICLE_ID)
-    return jsonify({"status": "locked", "result": res}), 200
+        return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
+
+    name = getattr(vehicle_manager.vehicles.get(VEHICLE_ID), "name", "Your car")
+    try:
+        vehicle_manager.lock(VEHICLE_ID)
+        return f"{name} has been locked.", 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception:
+        return "There was an issue locking the car.", 400, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.post("/unlock_car")
 def unlock_car():
     ok, msg = ensure_initialized()
     if not ok:
-        return jsonify({"error": msg}), 500
-    res = vehicle_manager.unlock(VEHICLE_ID)
-    return jsonify({"status": "unlocked", "result": res}), 200
+        return msg, 500, {"Content-Type": "text/plain; charset=utf-8"}
+
+    name = getattr(vehicle_manager.vehicles.get(VEHICLE_ID), "name", "Your car")
+    try:
+        vehicle_manager.unlock(VEHICLE_ID)
+        return f"{name} has been unlocked.", 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception:
+        return "There was an issue unlocking the car.", 400, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.post("/start_climate")
 def start_climate():
