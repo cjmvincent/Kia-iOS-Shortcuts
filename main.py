@@ -202,7 +202,7 @@ def start_climate():
     defrost = bool(body.get("defrost", False))
     # default temp; set CLIMATE_DEGREES=C in env if your car uses °C
     units = os.getenv("CLIMATE_DEGREES", "F").upper()
-    temperature = body.get("temperature", (22 if units == "C" else 72))
+    temperature = body.get("temperature", (22 if units == "C" else 70))
 
     # Build options with constructor first; fall back to setting attributes
     def build_opts(_duration, _defrost, _temp):
