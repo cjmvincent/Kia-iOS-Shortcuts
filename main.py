@@ -12,8 +12,6 @@ PASSWORD: Optional[str] = os.getenv("KIA_PASSWORD")
 PIN: Optional[str] = os.getenv("KIA_PIN")
 SECRET_KEY: Optional[str] = os.getenv("SECRET_KEY")
 VEHICLE_ID: Optional[str] = os.getenv("VEHICLE_ID")
-
-# Region/Brand via environment (integers). Common historical values: 3=US/NA, 1=Kia.
 REGION: int = int(os.getenv("KIA_REGION", "3"))
 BRAND: int = int(os.getenv("KIA_BRAND", "1"))
 
@@ -69,31 +67,7 @@ def health():
     return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 500)
 
 
-# --------- Status (JSON + Text) ---------
-@app.get("/status.json")
-def status_json():
-    ok, msg = ensure_initialized()
-    if not ok:
-        return jsonify({"error": msg}), 500
-
-    vehicle_manager.update_all_vehicles_with_cached_state()
-    v = vehicle_manager.vehicles.get(VEHICLE_ID)
-    if not v:
-        return jsonify({"error": f"Vehicle {VEHICLE_ID} not found."}), 404
-
-    payload = {
-        "vehicle_id": VEHICLE_ID,
-        "name": getattr(v, "name", None) or "Your car",
-        "locked": getattr(v, "is_locked", None),
-        "charging": getattr(v, "is_charging", None),
-        "battery": getattr(v, "battery_level", None),
-        "ignition_on": getattr(v, "ignition_on", None) or getattr(v, "engine_on", None),
-        "climate_on": getattr(v, "climate_on", None) or getattr(v, "is_climate_running", None),
-        "timestamp": getattr(v, "last_update", None),
-    }
-    return jsonify(payload), 200
-
-
+# --------- Get current status ---------
 @app.get("/status")
 def status_text():
     ok, msg = ensure_initialized()
