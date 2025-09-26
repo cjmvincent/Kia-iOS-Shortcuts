@@ -184,12 +184,12 @@ def start_climate():
     try:
         duration = int(body.get("duration", 10))
     except Exception:
-        duration = 10
+        duration = 15
     duration = max(1, min(duration, 30))
     defrost = bool(body.get("defrost", False))
     # default temp; set CLIMATE_DEGREES=C in env if your car uses °C
     units = os.getenv("CLIMATE_DEGREES", "F").upper()
-    temperature = body.get("temperature", (22 if units == "C" else 72))
+    temperature = body.get("temperature", (22 if units == "C" else 70))
 
     # Helpers
     def build_opts(_duration, _defrost, _temp):
@@ -305,4 +305,5 @@ def stop_climate():
 
 
 if __name__ == "__main__":
+    print("Starting Kia Vehicle Control API...")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
